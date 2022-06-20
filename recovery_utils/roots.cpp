@@ -39,12 +39,15 @@
 #include <ext4_utils/wipe.h>
 #include <fs_mgr.h>
 #include <fs_mgr/roots.h>
+#include <fs_mgr_dm_linear.h>
 
 #include "otautil/sysutil.h"
 
 using android::fs_mgr::Fstab;
 using android::fs_mgr::FstabEntry;
 using android::fs_mgr::ReadDefaultFstab;
+using android::dm::DeviceMapper;
+using android::dm::DmDeviceState;
 
 static void write_fstab_entry(const FstabEntry& entry, FILE* file) {
   if (entry.fs_type != "emmc" && !entry.fs_mgr_flags.vold_managed && !entry.blk_device.empty() &&
@@ -217,7 +220,7 @@ int format_volume(const std::string& volume, const std::string& directory) {
     LOG(ERROR) << "can't give path \"" << volume << "\" to format_volume";
     return -1;
   }
-  if (ensure_path_unmounted(volume) != 0) {
+  if (ensure_volume_unmounted(v->blk_device) != 0) {
     LOG(ERROR) << "format_volume: Failed to unmount \"" << v->mount_point << "\"";
     return -1;
   }
@@ -393,4 +396,37 @@ bool HasCache() {
   CHECK(!fstab.empty());
   static bool has_cache = volume_for_mount_point(CACHE_ROOT) != nullptr;
   return has_cache;
+}
+
+static bool logical_partitions_auto_mapped = false;
+
+void map_logical_partitions() {
+  if (android::base::GetBoolProperty("ro.boot.dynamic_partitions", false) &&
+      !logical_partitions_mapped()) {
+    std::string super_name = fs_mgr_get_super_partition_name();
+    if (!android::fs_mgr::CreateLogicalPartitions("/dev/block/by-name/" + super_name)) {
+      LOG(ERROR) << "Failed to map logical partitions";
+    } else {
+      logical_partitions_auto_mapped = true;
+    }
+  }
+}
+
+bool dm_find_system() {
+  auto rec = GetEntryForPath(&fstab, android::fs_mgr::GetSystemRoot());
+  if (!rec->fs_mgr_flags.logical) {
+    return false;
+  }
+  // If the fstab entry for system it's a path instead of a name, then it was already mapped
+  if (rec->blk_device[0] != '/') {
+    if (DeviceMapper::Instance().GetState(rec->blk_device) == DmDeviceState::INVALID) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool logical_partitions_mapped() {
+  return android::fs_mgr::LogicalPartitionsMapped() || logical_partitions_auto_mapped ||
+      dm_find_system();
 }

@@ -115,6 +115,10 @@ void gr_exit();
 
 int gr_fb_width();
 int gr_fb_height();
+int gr_fb_width_real();
+int gr_fb_height_real();
+int gr_overscan_offset_x();
+int gr_overscan_offset_y();
 
 void gr_flip();
 void gr_fb_blank(bool blank);
@@ -127,6 +131,7 @@ void gr_fill(int x1, int y1, int x2, int y2);
 void gr_texticon(int x, int y, const GRSurface* icon);
 
 const GRFont* gr_sys_font();
+const GRFont* gr_menu_font();
 int gr_init_font(const char* name, GRFont** dest);
 void gr_text(const GRFont* font, int x, int y, const char* s, bool bold);
 // Returns -1 if font is nullptr.

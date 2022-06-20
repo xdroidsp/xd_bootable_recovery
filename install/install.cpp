@@ -47,6 +47,7 @@
 #include <android-base/unique_fd.h>
 
 #include "install/package.h"
+#include "install/snapshot_utils.h"
 #include "install/spl_check.h"
 #include "install/verifier.h"
 #include "install/wipe_data.h"
@@ -80,7 +81,6 @@ bool ReadMetadataFromPackage(ZipArchiveHandle zip, std::map<std::string, std::st
   static constexpr const char* METADATA_PATH = "META-INF/com/android/metadata";
   ZipEntry64 entry;
   if (FindEntry(zip, METADATA_PATH, &entry) != 0) {
-    LOG(ERROR) << "Failed to find " << METADATA_PATH;
     return false;
   }
 
@@ -153,7 +153,7 @@ static bool CheckAbSpecificMetadata(const std::map<std::string, std::string>& me
     return false;
   }
 
-  auto device_fingerprint = android::base::GetProperty("ro.build.fingerprint", "");
+  auto device_fingerprint = android::base::GetProperty("ro.system_ext.build.fingerprint", "");
   auto pkg_pre_build_fingerprint = get_value(metadata, "pre-build");
   if (!pkg_pre_build_fingerprint.empty() &&
       !isInStringList(device_fingerprint, pkg_pre_build_fingerprint, FINGERPRING_SEPARATOR)) {
@@ -202,10 +202,10 @@ bool CheckPackageMetadata(const std::map<std::string, std::string>& metadata, Ot
     return false;
   }
 
-  auto device = android::base::GetProperty("ro.product.device", "");
+  auto device = android::base::GetProperty("ro.build.product", "");
   auto pkg_device = get_value(metadata, "pre-device");
   // device name can be a | separated list, so need to check
-  if (pkg_device.empty() || !isInStringList(device, pkg_device, FINGERPRING_SEPARATOR ":")) {
+  if (pkg_device.empty() || !isInStringList(device, pkg_device, FINGERPRING_SEPARATOR ":" ",")) {
     LOG(ERROR) << "Package is for product " << pkg_device << " but expected " << device;
     return false;
   }
@@ -338,16 +338,13 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
                                      int* max_temperature, RecoveryUI* ui) {
   std::map<std::string, std::string> metadata;
   auto zip = package->GetZipArchiveHandle();
-  if (!ReadMetadataFromPackage(zip, &metadata)) {
-    LOG(ERROR) << "Failed to parse metadata in the zip file";
-    return INSTALL_CORRUPT;
-  }
+  bool has_metadata = ReadMetadataFromPackage(zip, &metadata);
 
-  bool package_is_ab = get_value(metadata, "ota-type") == OtaTypeToString(OtaType::AB);
+  bool package_is_ab = has_metadata && get_value(metadata, "ota-type") == OtaTypeToString(OtaType::AB);
   bool device_supports_ab = android::base::GetBoolProperty("ro.build.ab_update", false);
-  bool ab_device_supports_nonab =
-      android::base::GetBoolProperty("ro.virtual_ab.allow_non_ab", false);
+  bool ab_device_supports_nonab = true;
   bool device_only_supports_ab = device_supports_ab && !ab_device_supports_nonab;
+  bool device_supports_virtual_ab = android::base::GetBoolProperty("ro.virtual_ab.enabled", false);
 
   /*const auto current_spl = android::base::GetProperty("ro.build.version.security_patch", "");
   if (ViolatesSPLDowngrade(zip, current_spl)) {
@@ -368,6 +365,15 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
       log_buffer->push_back(android::base::StringPrintf("error: %d", kUpdateBinaryCommandFailure));
       return INSTALL_ERROR;
     }
+  }
+
+  if (!package_is_ab && !logical_partitions_mapped()) {
+    CreateSnapshotPartitions();
+    map_logical_partitions();
+  } else if (package_is_ab && device_supports_virtual_ab && logical_partitions_mapped()) {
+    LOG(ERROR) << "Logical partitions are mapped. "
+               << "Please reboot recovery before installing an OTA update.";
+    return INSTALL_ERROR;
   }
 
   ReadSourceTargetBuild(metadata, log_buffer);

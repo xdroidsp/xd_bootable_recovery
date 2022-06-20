@@ -23,13 +23,15 @@
 size_t StubRecoveryUI::ShowMenu(const std::vector<std::string>& /* headers */,
                                 const std::vector<std::string>& /* items */,
                                 size_t /* initial_selection */, bool /* menu_only */,
-                                const std::function<int(int, bool)>& /*key_handler*/) {
+                                const std::function<int(int, bool)>& /*key_handler*/,
+                                bool /* refreshable */) {
   while (true) {
-    int key = WaitKey();
     // Exit the loop in the case of interruption or time out.
-    if (key == static_cast<int>(KeyError::INTERRUPTED) ||
-        key == static_cast<int>(KeyError::TIMED_OUT)) {
-      return static_cast<size_t>(key);
+    InputEvent evt = WaitInputEvent();
+    if (evt.type() == EventType::EXTRA) {
+      if (evt.key() == static_cast<int>(KeyError::INTERRUPTED) ||
+        evt.key() == static_cast<int>(KeyError::TIMED_OUT))
+          return static_cast<size_t>(evt.key());
     }
   }
   LOG(FATAL) << "Unreachable key selected in ShowMenu of stub UI";
