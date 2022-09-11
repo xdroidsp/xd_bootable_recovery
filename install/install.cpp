@@ -46,6 +46,7 @@
 #include <android-base/strings.h>
 #include <android-base/unique_fd.h>
 
+#include "install/snapshot_utils.h"
 #include "install/spl_check.h"
 #include "install/wipe_data.h"
 #include "otautil/error_code.h"
@@ -54,11 +55,15 @@
 #include "otautil/sysutil.h"
 #include "otautil/verifier.h"
 #include "private/setup_commands.h"
+#include "recovery_ui/device.h"
 #include "recovery_ui/ui.h"
 #include "recovery_utils/roots.h"
 #include "recovery_utils/thermalutil.h"
 
 using namespace std::chrono_literals;
+
+bool ask_to_continue_unverified(Device* device);
+bool ask_to_continue_downgrade(Device* device);
 
 static constexpr int kRecoveryApiVersion = 3;
 // We define RECOVERY_API_VERSION in Android.mk, which will be picked up by build system and packed
@@ -69,7 +74,7 @@ static_assert(kRecoveryApiVersion == RECOVERY_API_VERSION, "Mismatching recovery
 static constexpr int VERIFICATION_PROGRESS_TIME = 60;
 static constexpr float VERIFICATION_PROGRESS_FRACTION = 0.25;
 // The charater used to separate dynamic fingerprints. e.x. sargo|aosp-sargo
-static const char* FINGERPRING_SEPARATOR = "|";
+#define FINGERPRING_SEPARATOR "|"
 static std::condition_variable finish_log_temperature;
 static bool isInStringList(const std::string& target_token, const std::string& str_list,
                            const std::string& deliminator);
@@ -80,7 +85,6 @@ bool ReadMetadataFromPackage(ZipArchiveHandle zip, std::map<std::string, std::st
   static constexpr const char* METADATA_PATH = "META-INF/com/android/metadata";
   ZipEntry64 entry;
   if (FindEntry(zip, METADATA_PATH, &entry) != 0) {
-    LOG(ERROR) << "Failed to find " << METADATA_PATH;
     return false;
   }
 
@@ -143,7 +147,8 @@ static void ReadSourceTargetBuild(const std::map<std::string, std::string>& meta
 // Checks the build version, fingerprint and timestamp in the metadata of the A/B package.
 // Downgrading is not allowed unless explicitly enabled in the package and only for
 // incremental packages.
-static bool CheckAbSpecificMetadata(const std::map<std::string, std::string>& metadata) {
+static bool CheckAbSpecificMetadata(const std::map<std::string, std::string>& metadata,
+                                    RecoveryUI* ui) {
   // Incremental updates should match the current build.
   auto device_pre_build = android::base::GetProperty("ro.build.version.incremental", "");
   auto pkg_pre_build = get_value(metadata, "pre-build-incremental");
@@ -163,6 +168,7 @@ static bool CheckAbSpecificMetadata(const std::map<std::string, std::string>& me
   }
 
   // Check for downgrade version.
+  bool undeclared_downgrade = false;
   int64_t build_timestamp =
       android::base::GetIntProperty("ro.build.date.utc", std::numeric_limits<int64_t>::max());
   int64_t pkg_post_timestamp = 0;
@@ -177,18 +183,23 @@ static bool CheckAbSpecificMetadata(const std::map<std::string, std::string>& me
                     "newer than timestamp "
                  << build_timestamp << " but package has timestamp " << pkg_post_timestamp
                  << " and downgrade not allowed.";
-      return false;
-    }
-    if (pkg_pre_build_fingerprint.empty()) {
+      undeclared_downgrade = true;
+    } else if (pkg_pre_build_fingerprint.empty()) {
       LOG(ERROR) << "Downgrade package must have a pre-build version set, not allowed.";
-      return false;
+      undeclared_downgrade = true;
     }
+  }
+
+  if (undeclared_downgrade &&
+      !(ui->IsTextVisible() && ask_to_continue_downgrade(ui->GetDevice()))) {
+    return false;
   }
 
   return true;
 }
 
-bool CheckPackageMetadata(const std::map<std::string, std::string>& metadata, OtaType ota_type) {
+bool CheckPackageMetadata(const std::map<std::string, std::string>& metadata, OtaType ota_type,
+                          RecoveryUI* ui) {
   auto package_ota_type = get_value(metadata, "ota-type");
   auto expected_ota_type = OtaTypeToString(ota_type);
   if (ota_type != OtaType::AB && ota_type != OtaType::BRICK) {
@@ -205,7 +216,7 @@ bool CheckPackageMetadata(const std::map<std::string, std::string>& metadata, Ot
   auto device = android::base::GetProperty("ro.product.device", "");
   auto pkg_device = get_value(metadata, "pre-device");
   // device name can be a | separated list, so need to check
-  if (pkg_device.empty() || !isInStringList(device, pkg_device, FINGERPRING_SEPARATOR)) {
+  if (pkg_device.empty() || !isInStringList(device, pkg_device, FINGERPRING_SEPARATOR ":" ",")) {
     LOG(ERROR) << "Package is for product " << pkg_device << " but expected " << device;
     return false;
   }
@@ -229,7 +240,7 @@ bool CheckPackageMetadata(const std::map<std::string, std::string>& metadata, Ot
   }
 
   if (ota_type == OtaType::AB) {
-    return CheckAbSpecificMetadata(metadata);
+    return CheckAbSpecificMetadata(metadata, ui);
   }
 
   return true;
@@ -359,16 +370,13 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
   auto ui = device->GetUI();
   std::map<std::string, std::string> metadata;
   auto zip = package->GetZipArchiveHandle();
-  if (!ReadMetadataFromPackage(zip, &metadata)) {
-    LOG(ERROR) << "Failed to parse metadata in the zip file";
-    return INSTALL_CORRUPT;
-  }
+  bool has_metadata = ReadMetadataFromPackage(zip, &metadata);
 
-  bool package_is_ab = get_value(metadata, "ota-type") == OtaTypeToString(OtaType::AB);
+  bool package_is_ab = has_metadata && get_value(metadata, "ota-type") == OtaTypeToString(OtaType::AB);
   bool device_supports_ab = android::base::GetBoolProperty("ro.build.ab_update", false);
-  bool ab_device_supports_nonab =
-      android::base::GetBoolProperty("ro.virtual_ab.allow_non_ab", false);
+  bool ab_device_supports_nonab = true;
   bool device_only_supports_ab = device_supports_ab && !ab_device_supports_nonab;
+  bool device_supports_virtual_ab = android::base::GetBoolProperty("ro.virtual_ab.enabled", false);
 
   const auto current_spl = android::base::GetProperty("ro.build.version.security_patch", "");
   if (ViolatesSPLDowngrade(zip, current_spl)) {
@@ -385,10 +393,19 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
   // Package does not declare itself as an A/B package, but device only supports A/B;
   //   still calls CheckPackageMetadata to get a meaningful error message.
   if (package_is_ab || device_only_supports_ab) {
-    if (!CheckPackageMetadata(metadata, OtaType::AB)) {
+    if (!CheckPackageMetadata(metadata, OtaType::AB, ui)) {
       log_buffer->push_back(android::base::StringPrintf("error: %d", kUpdateBinaryCommandFailure));
       return INSTALL_ERROR;
     }
+  }
+
+  if (!package_is_ab && !logical_partitions_mapped()) {
+    CreateSnapshotPartitions();
+    map_logical_partitions();
+  } else if (package_is_ab && device_supports_virtual_ab && logical_partitions_mapped()) {
+    LOG(ERROR) << "Logical partitions are mapped. "
+               << "Please reboot recovery before installing an OTA update.";
+    return INSTALL_ERROR;
   }
 
   ReadSourceTargetBuild(metadata, log_buffer);
@@ -504,7 +521,9 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
         LOG(ERROR) << "invalid \"set_progress\" parameters: " << line;
       }
     } else if (command == "ui_print") {
-      ui->PrintOnScreenOnly("%s\n", args.c_str());
+      // Keep all spaces
+      args = line.substr(space + 1);
+      ui->PrintOnScreenOnly("%s", args.c_str());
       fflush(stdout);
     } else if (command == "wipe_cache") {
       *wipe_cache = true;
@@ -568,7 +587,9 @@ static InstallResult VerifyAndInstallPackage(Package* package, bool* wipe_cache,
   // Verify package.
   if (!verify_package(package, ui)) {
     log_buffer->push_back(android::base::StringPrintf("error: %d", kZipVerificationFailure));
-    return INSTALL_CORRUPT;
+    if (!ui->IsTextVisible() || !ask_to_continue_unverified(ui->GetDevice())) {
+        return INSTALL_CORRUPT;
+    }
   }
 
   // Verify and install the contents of the package.

@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2019 The LineageOS Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,8 +25,7 @@
 #include <string>
 #include <vector>
 
-// Forward declaration to avoid including "ui.h".
-class RecoveryUI;
+#include "ui.h"
 
 class BootState;
 
@@ -35,6 +35,12 @@ class Device {
   static constexpr const int kHighlightUp = -2;
   static constexpr const int kHighlightDown = -3;
   static constexpr const int kInvokeItem = -4;
+  static constexpr const int kGoBack = -5;
+  static constexpr const int kGoHome = -6;
+  static constexpr const int kDoSideload = -7;
+  static constexpr const int kScrollUp = -8;
+  static constexpr const int kScrollDown = -9;
+  static constexpr const int kRefresh = -10;
 
   // ENTER vs REBOOT: The latter will trigger a reboot that goes through bootloader, which allows
   // using a new bootloader / recovery image if applicable. For example, REBOOT_RESCUE goes from
@@ -43,9 +49,9 @@ class Device {
   enum BuiltinAction {
     NO_ACTION = 0,
     REBOOT = 1,
-    APPLY_SDCARD = 2,
+    APPLY_UPDATE = 2,
     // APPLY_CACHE was 3.
-    APPLY_ADB_SIDELOAD = 4,
+    // APPLY_ADB_SIDELOAD was 4.
     WIPE_DATA = 5,
     WIPE_CACHE = 6,
     REBOOT_BOOTLOADER = 7,
@@ -63,6 +69,11 @@ class Device {
     REBOOT_RESCUE = 19,
     REBOOT_FROM_FASTBOOT = 20,
     SHUTDOWN_FROM_FASTBOOT = 21,
+    WIPE_SYSTEM = 100,
+    ENABLE_ADB = 101,
+    MENU_BASE = 200,
+    MENU_WIPE = 202,
+    MENU_ADVANCED = 203,
   };
 
   explicit Device(RecoveryUI* ui);
@@ -112,9 +123,15 @@ class Device {
   //   - invoke a specific action (a menu position: non-negative value)
   virtual int HandleMenuKey(int key, bool visible);
 
-  // Returns the list of menu items (a vector of strings). The menu_position passed to
-  // InvokeMenuItem() will correspond to the indexes into this array.
+  // Returns the list of the currently visible menu items (a vector of strings).
+  // The menu_position passed to InvokeMenuItem() will correspond to the indexes into this array.
   virtual const std::vector<std::string>& GetMenuItems();
+
+  // Returns headers for the currently visible menu. Can be empty vector.
+  virtual const std::vector<std::string>& GetMenuHeaders();
+
+  // Return to the main menu
+  virtual void GoHome();
 
   // Performs a recovery action selected from the menu. 'menu_position' will be the index of the
   // selected menu item, or a non-negative value returned from HandleMenuKey(). The menu will be
@@ -146,6 +163,10 @@ class Device {
   // the caller's responsibility to perform the check and handle the exception.
   std::optional<std::string> GetReason() const;
   std::optional<std::string> GetStage() const;
+
+  virtual void handleVolumeChanged() {
+    ui_->onVolumeChanged();
+  }
 
  private:
   // The RecoveryUI object that should be used to display the user interface for this device.

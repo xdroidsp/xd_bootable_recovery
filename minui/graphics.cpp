@@ -30,6 +30,7 @@
 #include "minui/minui.h"
 
 static GRFont* gr_font = nullptr;
+static GRFont* gr_font_menu = nullptr;
 static MinuiBackend* gr_backend = nullptr;
 
 static int overscan_offset_x = 0;
@@ -53,6 +54,10 @@ static bool outside(int x, int y) {
 
 const GRFont* gr_sys_font() {
   return gr_font;
+}
+
+const GRFont* gr_menu_font() {
+  return gr_font_menu;
 }
 
 PixelFormat gr_pixel_format() {
@@ -423,6 +428,11 @@ int gr_init(std::initializer_list<GraphicsBackend> backends) {
     printf("Failed to init font: %d, continuing graphic backend initialization without font file\n",
            ret);
   }
+  ret = gr_init_font("font_menu", &gr_font_menu);
+  if (ret != 0) {
+    printf("Failed to init menu font: %d. Falling back to system font\n", ret);
+    gr_font_menu = gr_font;
+  }
 
   std::unique_ptr<MinuiBackend> minui_backend;
   for (GraphicsBackend backend : backends) {
@@ -489,6 +499,24 @@ int gr_fb_height() {
   return (rotation == GRRotation::LEFT || rotation == GRRotation::RIGHT)
              ? gr_draw->width - 2 * overscan_offset_x
              : gr_draw->height - 2 * overscan_offset_y;
+}
+
+int gr_fb_width_real() {
+  return (rotation == GRRotation::LEFT || rotation == GRRotation::RIGHT) ? gr_draw->height
+                                                                         : gr_draw->width;
+}
+
+int gr_fb_height_real() {
+  return (rotation == GRRotation::LEFT || rotation == GRRotation::RIGHT) ? gr_draw->width
+                                                                         : gr_draw->height;
+}
+
+int gr_overscan_offset_x() {
+  return overscan_offset_x;
+}
+
+int gr_overscan_offset_y() {
+  return overscan_offset_y;
 }
 
 void gr_fb_blank(bool blank) {

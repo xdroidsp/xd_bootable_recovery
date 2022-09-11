@@ -31,6 +31,7 @@
 #include <memory>
 #include <string>
 
+#include <android-base/properties.h>
 #include <android-base/strings.h>
 #include <android-base/unique_fd.h>
 
@@ -63,6 +64,11 @@ static size_t g_ev_count = 0;
 static size_t g_ev_dev_count = 0;
 static size_t g_ev_misc_count = 0;
 
+static bool should_skip_ev_rel() {
+  static bool prop = android::base::GetBoolProperty("ro.recovery.skip_ev_rel_input", false);
+  return prop;
+}
+
 static bool test_bit(size_t bit, unsigned long* array) { // NOLINT
   return (array[bit / BITS_PER_LONG] & (1UL << (bit % BITS_PER_LONG))) != 0;
 }
@@ -76,9 +82,12 @@ static bool should_add_input_device(int fd, bool allow_touch_inputs) {
     return false;
   }
 
-  // We assume that only EV_KEY, EV_REL, and EV_SW event types are ever needed. EV_ABS is also
-  // allowed if allow_touch_inputs is set.
-  if (!test_bit(EV_KEY, ev_bits) && !test_bit(EV_REL, ev_bits) && !test_bit(EV_SW, ev_bits)) {
+  // We assume that only EV_ABS, EV_KEY, EV_REL, and EV_SW event types are ever needed.
+  // EV_ABS is only allowed if allow_touch_inputs is set.
+  // EV_REL can be explicitly disallowed. This is needed to skip sensor inputs on some devices.
+  if (!test_bit(EV_KEY, ev_bits) &&
+      !test_bit(EV_SW, ev_bits) &&
+      (should_skip_ev_rel() || !test_bit(EV_REL, ev_bits))) {
     if (!allow_touch_inputs || !test_bit(EV_ABS, ev_bits)) {
       return false;
     }
@@ -325,7 +334,7 @@ int ev_sync_key_state(const ev_set_key_callback& set_key_cb) {
   return 0;
 }
 
-void ev_iterate_available_keys(const std::function<void(int)>& f) {
+void ev_iterate_available_keys(const std::function<void(int)>& key_detected) {
   // Use unsigned long to match ioctl's parameter type.
   unsigned long ev_bits[BITS_TO_LONGS(EV_MAX)];    // NOLINT
   unsigned long key_bits[BITS_TO_LONGS(KEY_MAX)];  // NOLINT
@@ -348,13 +357,14 @@ void ev_iterate_available_keys(const std::function<void(int)>& f) {
 
     for (int key_code = 0; key_code <= KEY_MAX; ++key_code) {
       if (test_bit(key_code, key_bits)) {
-        f(key_code);
+        key_detected(key_code);
       }
     }
   }
 }
 
-void ev_iterate_touch_inputs(const std::function<void(int)>& action) {
+void ev_iterate_touch_inputs(const std::function<void(int)>& touch_device_detected,
+                             const std::function<void(int)>& key_detected) {
   for (size_t i = 0; i < g_ev_dev_count; ++i) {
     // Use unsigned long to match ioctl's parameter type.
     unsigned long ev_bits[BITS_TO_LONGS(EV_MAX)] = {};  // NOLINT
@@ -370,9 +380,11 @@ void ev_iterate_touch_inputs(const std::function<void(int)>& action) {
       continue;
     }
 
+    touch_device_detected(ev_fdinfo[i].fd);
+
     for (int key_code = 0; key_code <= KEY_MAX; ++key_code) {
       if (test_bit(key_code, key_bits)) {
-        action(key_code);
+        key_detected(key_code);
       }
     }
   }
